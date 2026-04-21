@@ -29,9 +29,10 @@ class APM_Former_ImageOnly(nn.Module):
         self.anatomy_guide_gen = AnatomyPriorGuideGeneration(k_channels=guide_channels)
         
         # 特征通道配置
+        feat_shallow_channels = feature_size 
         feat_mid_channels = feature_size * 2
         feat_deep_channels = feature_size * 4
-        mri_feature_channels = feat_mid_channels + feat_deep_channels
+        mri_feature_channels = feat_shallow_channels + feat_mid_channels + feat_deep_channels
         
         self.anatomy_alignment = AnatomyGuidedAlignment(
             mri_channels=mri_feature_channels, 
@@ -56,13 +57,13 @@ class APM_Former_ImageOnly(nn.Module):
         
         # 2. Swin特征提取
         hidden_states = self.swin_backbone.swinViT(mri_image)
+        feat_shallow = hidden_states[0]
         feat_mid = hidden_states[1]
         feat_deep = hidden_states[2]
+        feat_shallow_down = F.adaptive_avg_pool3d(feat_shallow, output_size=feat_mid.shape[2:])
         feat_deep_up = F.interpolate(feat_deep, size=feat_mid.shape[2:], mode='trilinear', align_corners=False)
-        swin_feature = torch.cat([feat_mid, feat_deep_up], dim=1)
+        swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
         
-        # 🚨 核心修复2：临时跳过解剖对齐模块（解决梯度消失，模型学不动）
-        # aligned_features = swin_feature  # 直接使用原始特征，禁用alignment
         aligned_features = self.anatomy_alignment(swin_feature, guide_map)
         
         # 3. 空间注意力
