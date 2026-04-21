@@ -1,0 +1,14 @@
+data/
+Julich/
+checkpoints/
+logs/
+template/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pth
+*.pt
+*.bin
+.vscode/
+*.log
+*.txt
