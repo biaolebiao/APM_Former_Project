@@ -33,6 +33,18 @@ class APM_Former_ImageOnly(nn.Module):
         feat_mid_channels = feature_size * 2
         feat_deep_channels = feature_size * 4
         mri_feature_channels = feat_shallow_channels + feat_mid_channels + feat_deep_channels
+        # mri_feature_channels = feat_mid_channels + feat_deep_channels
+
+        # 🌟 新增抢救代码：用卷积替代平均池化来进行智能下采样
+        self.shallow_downsample = nn.Sequential(
+            # kernel_size=3, stride=2, padding=1 可以完美将空间尺寸减半 (48 -> 24)
+            nn.Conv3d(feat_shallow_channels, feat_shallow_channels, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm3d(feat_shallow_channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        # 👇 加上这两行科学初始化代码，防止新卷积层开局输出巨大噪声
+        nn.init.kaiming_normal_(self.shallow_downsample[0].weight, mode='fan_out', nonlinearity='leaky_relu')
+        nn.init.zeros_(self.shallow_downsample[0].bias)
         
         self.anatomy_alignment = AnatomyGuidedAlignment(
             mri_channels=mri_feature_channels, 
@@ -60,7 +72,9 @@ class APM_Former_ImageOnly(nn.Module):
         feat_shallow = hidden_states[0]
         feat_mid = hidden_states[1]
         feat_deep = hidden_states[2]
-        feat_shallow_down = F.adaptive_avg_pool3d(feat_shallow, output_size=feat_mid.shape[2:])
+        # 🌟 抢救代码：使用可学习的卷积进行特征浓缩，而不是直接平均
+        feat_shallow_down = self.shallow_downsample(feat_shallow)
+        # feat_shallow_down = F.adaptive_avg_pool3d(feat_shallow, output_size=feat_mid.shape[2:])
         feat_deep_up = F.interpolate(feat_deep, size=feat_mid.shape[2:], mode='trilinear', align_corners=False)
         swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
         
