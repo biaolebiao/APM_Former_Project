@@ -18,24 +18,33 @@ class AnatomyGuidedAlignment(nn.Module):
         
         # 拼接后的总通道数 (MRI特征 + 解剖先验)
         in_channels = mri_channels + guide_channels
-        self.offset_net = nn.Sequential(
+        # 1. 共享特征提取主干
+        self.shared_net = nn.Sequential(
             nn.Conv3d(in_channels, in_channels // 2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(in_channels // 2),
             nn.LeakyReLU(0.2, inplace=True),
             
             nn.Conv3d(in_channels // 2, in_channels // 4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(in_channels // 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            nn.Conv3d(in_channels // 4, 3, kernel_size=3, padding=1)
+            nn.LeakyReLU(0.2, inplace=True)
         )
         
+        # 2. 偏移量预测头 (输出 3 个通道: Z, Y, X 的形变)
+        self.offset_head = nn.Conv3d(in_channels // 4, 3, kernel_size=3, padding=1)
+        
+        # 3. 调制掩码预测头 (输出 1 个通道: 0~1的注意力权重)
+        self.mask_head = nn.Conv3d(in_channels // 4, 1, kernel_size=3, padding=1)
+        
         # 【极其关键的初始化神技】
-        # 强制将最后一层的权重和偏置初始化为 0。
-        # 这样在模型刚开始训练(冷启动)时，网络预测的形变场完全为 0。
-        # 相当于初始状态下“不做任何形变拉扯”，避免由于随机初始化导致图像被撕裂、Loss 爆炸。
-        nn.init.zeros_(self.offset_net[-1].weight)
-        nn.init.zeros_(self.offset_net[-1].bias)
+        # 强制将偏移头的权重和偏置初始化为 0，确保初始形变为 0
+        nn.init.zeros_(self.offset_head.weight)
+        nn.init.zeros_(self.offset_head.bias)
+        
+        # 掩码头的权重初始化为 0，偏置初始化为 0
+        # 这样初始状态下 raw_mask 为 0，经过 sigmoid 后变为 0.5
+        # 意味着初始状态下所有特征被一视同仁地保留 50%
+        nn.init.zeros_(self.mask_head.weight)
+        nn.init.zeros_(self.mask_head.bias)
 
     def forward(self, mri_features, anatomy_guide_map):
         """
@@ -72,13 +81,18 @@ class AnatomyGuidedAlignment(nn.Module):
         # 形状变为 (B, C+18, D', H', W')
         fused_features = torch.cat([mri_features, guide_down], dim=1)
         
+        # 3. 提取共享特征并双头预测 (Offsets & Mask)
         # ==========================================
-        # 3. 预测解剖约束的 3D 位移场 (Predict Displacement)
-        # ==========================================
-        # 网络根据拼接后的特征，预测出抓取偏移量。
-        # 形状: (B, 3, D', H', W')
-        raw_displacement= self.offset_net(fused_features)
+        shared_feat = self.shared_net(fused_features)
+        
+        # 预测形变场 (B, 3, D', H', W')
+        raw_displacement = self.offset_head(shared_feat)
         displacement_field = torch.tanh(raw_displacement) * self.displacement_scale
+        
+        # 预测调制掩码 (B, 1, D', H', W')
+        raw_mask = self.mask_head(shared_feat)
+        # 使用 sigmoid 将掩码约束到 [0, 1] 之间
+        modulation_mask = torch.sigmoid(raw_mask)
         
         # ==========================================
         # 4. 构建标准的三维坐标网格 (Standard Grid)
@@ -104,8 +118,22 @@ class AnatomyGuidedAlignment(nn.Module):
         # ==========================================
         # 将位移场的通道维移到最后: (B, 3, D', H', W') -> (B, D', H', W', 3)
         displacement_field = displacement_field.permute(0, 2, 3, 4, 1)
-        
+        print(f"raw_displacement 的形状: {raw_displacement.shape}")
+        print(f"base_grid 的形状: {base_grid.shape}")
+        print(f"displacement_field 的形状: {displacement_field.shape}")
         # 标准网格 + 网络预测的拉力位移 = 变形后的弹性网格
+        deformed_grid = base_grid + displacement_field
+
+        B, C, D_feat, H_feat, W_feat = mri_features.shape
+        vectors = [
+            torch.linspace(-1, 1, D_feat, device=mri_features.device),
+            torch.linspace(-1, 1, H_feat, device=mri_features.device),
+            torch.linspace(-1, 1, W_feat, device=mri_features.device)
+        ]
+        grid_d, grid_h, grid_w = torch.meshgrid(vectors, indexing='ij')
+        base_grid = torch.stack([grid_w, grid_h, grid_d], dim=-1).unsqueeze(0).expand(B, -1, -1, -1, -1)
+        
+        displacement_field = displacement_field.permute(0, 2, 3, 4, 1)
         deformed_grid = base_grid + displacement_field
         
         # ==========================================
@@ -119,5 +147,7 @@ class AnatomyGuidedAlignment(nn.Module):
             padding_mode='border', # 超出边界的采样点直接取边缘值
             align_corners=False
         )
+
+        modulated_features = aligned_features * modulation_mask
         
-        return aligned_features
+        return modulated_features
