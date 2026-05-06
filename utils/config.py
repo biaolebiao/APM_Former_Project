@@ -52,7 +52,7 @@ GUIDE_MAP_CONFIG = {
 }
 
 # 5.训练配置
-BATCH_SIZE = 4               # 批次大小（显存小就设2/4）
+BATCH_SIZE = 1               # 批次大小（显存小就设2/4）
 NUM_WORKERS = 4              # 数据加载线程（Windows设0，Linux设4）
 TRAIN_IMG_SIZE = (96, 96, 96)# 输入MRI尺寸
 SAVE_MODEL_PATH = "best_model.pth" # 最佳模型保存路径
