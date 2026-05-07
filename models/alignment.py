@@ -74,7 +74,9 @@ class AnatomyGuidedAlignment(nn.Module):
             align_corners=False
         )
         
-        # 🌟 掩码调制：压制背景噪声
-        modulated_features = aligned_features * modulation_mask
+        
+        # 🌟 修改这里：增加残差连接 (Residual Connection)
+        # 即使 modulation_mask 初期没学好，原始特征 aligned_features 也能无损传导梯度
+        modulated_features = aligned_features + aligned_features * modulation_mask
         
         return modulated_features
