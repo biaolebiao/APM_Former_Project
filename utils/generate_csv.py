@@ -65,8 +65,8 @@ def generate_master_csv():
     df.to_csv(output_path, index=False)
     
     logger.info(f"✅ 成功生成总表！共找到 {len(df)} 个样本。")
-    logger.info(f"其中 sMCI(0): {len(df[df['Label']==0])} 例")
-    logger.info(f"其中 pMCI(1): {len(df[df['Label']==1])} 例")
+    logger.info(f"其中 CN(0): {len(df[df['Label']==0])} 例")  #sMCI CN
+    logger.info(f"其中 AD(1): {len(df[df['Label']==1])} 例")  #pMCI AD
     logger.info(f"表格已保存至: {output_path}")
     
     return df
