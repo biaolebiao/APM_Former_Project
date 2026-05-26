@@ -106,3 +106,40 @@ def get_adni_dataloaders(
 
     logger.info(f"训练集批次: {len(train_loader)}，验证集批次: {len(val_loader)}")
     return train_loader, val_loader
+
+def get_test_dataloader(
+    test_csv, 
+    batch_size=4, 
+    target_size=(96, 96, 96),
+    num_workers=4
+):
+    """
+    专门用于生成测试集的 DataLoader。
+    测试集的数据预处理必须与验证集保持绝对一致（纯净，无随机增强）。
+    """
+    logger.info(f"🧪 正在初始化测试集 DataLoader (来源: {test_csv})")
+    
+    # 预处理流程 (Transforms) 必须和 val_transforms 一模一样
+    test_transforms = Compose([
+        LoadImaged(keys=["image"]),
+        EnsureChannelFirstd(keys=["image"]),
+        NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+        CropForegroundd(keys=["image"], source_key="image"),
+        Resized(keys=["image"], spatial_size=target_size, mode='trilinear'),
+        ToTensord(keys=["image"])
+    ])
+    
+    # 实例化 Dataset
+    test_dataset = ADNIDataset(csv_file=test_csv, transform=test_transforms)
+    
+    # 实例化 DataLoader (不需要 shuffle)
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers, 
+        pin_memory=True
+    )
+    
+    logger.info(f"✅ 测试集加载完成，共 {len(test_loader)} 个批次。")
+    return test_loader
