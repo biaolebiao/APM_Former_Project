@@ -12,7 +12,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # 0.全局任务开关
-CURRENT_TASK = "AD_CN" #可选值：AD_CN或MCI
+CURRENT_TASK = "MCI" #可选值：AD_CN或MCI
 
 # 1. generate_csv.py 配置
 # 1. 根据任务自动切换数据源、CSV目录和模型命名
