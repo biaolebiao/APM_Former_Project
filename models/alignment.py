@@ -79,4 +79,4 @@ class AnatomyGuidedAlignment(nn.Module):
         # 即使 modulation_mask 初期没学好，原始特征 aligned_features 也能无损传导梯度
         modulated_features = aligned_features + aligned_features * modulation_mask
         
-        return modulated_features
+        return modulated_features,displacement_field

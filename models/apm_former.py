@@ -78,7 +78,7 @@ class APM_Former_ImageOnly(nn.Module):
         feat_deep_up = F.interpolate(feat_deep, size=feat_mid.shape[2:], mode='trilinear', align_corners=False)
         swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
         
-        aligned_features = self.anatomy_alignment(swin_feature, guide_map)
+        aligned_features,displacement_field = self.anatomy_alignment(swin_feature, guide_map)
         
         # 3. 空间注意力
         guide_down = F.interpolate(guide_map, size=aligned_features.shape[2:], mode='trilinear', align_corners=False)
@@ -90,7 +90,7 @@ class APM_Former_ImageOnly(nn.Module):
         flattened_features = torch.flatten(pooled_features, 1)
         logits = self.classifier(flattened_features)
         
-        return logits, aligned_features, spatial_attention
+        return logits, aligned_features, spatial_attention, displacement_field
     
     def train(self, mode=True):
         super().train(mode)
