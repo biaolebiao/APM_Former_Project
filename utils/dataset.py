@@ -6,7 +6,8 @@ import pandas as pd
 import numpy as np
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, NormalizeIntensityd,
-    CropForegroundd, Resized, ToTensord, RandAffineD, RandFlipd
+    CropForegroundd, Resized, ToTensord, RandAffineD, RandFlipd,
+    RandGaussianNoiseD, RandAdjustContrastd, RandGaussianSmoothD
 )
 from utils.logging_utils import get_logger
 
@@ -96,6 +97,9 @@ def get_adni_dataloaders(
             CropForegroundd(keys=["image"], source_key="image"),
             Resized(keys=["image"], spatial_size=target_size, mode='trilinear'),
             RandAffineD(keys=["image"], prob=0.5, rotate_range=(0.1, 0.1, 0.1), translate_range=(5, 5, 5)),
+            # RandGaussianNoiseD(keys=["image"], prob=0.2, mean=0.0, std=0.05), # 模拟不同扫描仪的底噪
+            # RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.5)),  # 模拟不同机器的对比度差异
+            # RandGaussianSmoothD(keys=["image"], prob=0.2, sigma_x=(0.5, 1.5), sigma_y=(0.5, 1.5), sigma_z=(0.5, 1.5)), # 模拟轻微的运动伪影/模糊
             ToTensord(keys=["image"])
         ])
         train_dataset = ADNIDataset(csv_file=train_csv, transform=train_transforms)
