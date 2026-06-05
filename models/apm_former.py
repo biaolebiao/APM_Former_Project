@@ -41,19 +41,26 @@ class APM_Former_ImageOnly(nn.Module):
         mri_feature_channels = feat_shallow_channels + feat_mid_channels + feat_deep_channels
         # mri_feature_channels = feat_mid_channels + feat_deep_channels
 
-        # 🌟 新增抢救代码：用卷积替代平均池化来进行智能下采样
         self.shallow_downsample = nn.Sequential(
             # kernel_size=3, stride=2, padding=1 可以完美将空间尺寸减半 (48 -> 24)
             nn.Conv3d(feat_shallow_channels, feat_shallow_channels, kernel_size=3, stride=2, padding=1),
             nn.InstanceNorm3d(feat_shallow_channels),
             nn.LeakyReLU(0.2, inplace=True)
         )
-        # 👇 加上这两行科学初始化代码，防止新卷积层开局输出巨大噪声
+        # 加上科学初始化代码，防止新卷积层开局输出巨大噪声
         nn.init.kaiming_normal_(self.shallow_downsample[0].weight, mode='fan_out', nonlinearity='leaky_relu')
         nn.init.zeros_(self.shallow_downsample[0].bias)
+
+        
+        #  新增核心：特征平滑与降维层 (将 168 维降到 48 维) 
+        self.feature_fusion = nn.Sequential(
+            nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False),
+            nn.InstanceNorm3d(feat_mid_channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
         
         self.anatomy_alignment = AnatomyGuidedAlignment(
-            mri_channels=mri_feature_channels, 
+            mri_channels=feat_mid_channels, # 👇 修改：这里原来是 mri_feature_channels，现在改为降维后的 feat_mid_channels
             guide_channels=guide_channels
         )
         
@@ -61,7 +68,7 @@ class APM_Former_ImageOnly(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool3d(1)
         self.classifier = nn.Sequential(
             nn.Dropout(p=dropout1),
-            nn.Linear(mri_feature_channels, fc_hidden),
+            nn.Linear(feat_mid_channels, fc_hidden), # 👇 修改：这里原来是 mri_feature_channels，现在改为降维后的 feat_mid_channels
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout2),
             nn.Linear(fc_hidden, num_classes)
@@ -79,7 +86,10 @@ class APM_Former_ImageOnly(nn.Module):
         # 使用可学习的卷积进行特征浓缩
         feat_shallow_down = self.shallow_downsample(feat_shallow)
         feat_deep_up = F.interpolate(feat_deep, size=feat_mid.shape[2:], mode='trilinear', align_corners=False)
-        swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        # swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        # 👇 修改：拼接后立刻进行特征平滑和降维
+        swin_feature_raw = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        swin_feature = self.feature_fusion(swin_feature_raw)
         
         # 🔴 关键点：设定默认的占位返回值
         # 为了保证无论走哪个 if 分支，最后 return 的 4 个变量都存在，防止外面的代码解包报错
