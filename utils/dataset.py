@@ -64,7 +64,7 @@ def get_adni_dataloaders(
 
     # 根据传入的 use_sampler 参数决定训练集策略
     if use_sampler:
-        logger.info("🧪 启用【1:1动态加权采样 + 翻转增强】策略")
+        logger.info("🧪 启用1:1动态加权采样策略")
         train_transforms = Compose([
             LoadImaged(keys=["image"]), EnsureChannelFirstd(keys=["image"]),
             NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
