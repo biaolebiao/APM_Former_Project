@@ -74,7 +74,7 @@ class APM_Former_ImageOnly(nn.Module):
             nn.Linear(fc_hidden, num_classes)
         )
         
-        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0,bias=False)
+        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0)
         
     def forward(self, mri_image):
         # 1. Swin特征提取 (这是所有消融实验都要用到的 Baseline)
@@ -106,13 +106,14 @@ class APM_Former_ImageOnly(nn.Module):
             guide_down = F.interpolate(guide_map, size=aligned_features.shape[2:], mode='trilinear', align_corners=False)
             spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
 
- # 🌟 新增补丁：根据图谱通道求和，生成 0/1 掩码，强行抹除所有非核心区的 Bias 噪音
-            # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
-            # 恢复为最初的硬约束
-            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
-            spatial_attention = spatial_attention * guide_spatial_mask  # 强制外围清零
+#  # 🌟 新增补丁：根据图谱通道求和，生成 0/1 掩码，强行抹除所有非核心区的 Bias 噪音
+#             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
+#             # 恢复为最初的硬约束
+#             guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
+#             spatial_attention = spatial_attention * guide_spatial_mask  # 强制外围清零
             
-            focused_features = aligned_features + (aligned_features * spatial_attention)
+            # focused_features = aligned_features + (aligned_features * spatial_attention)
+            focused_features = aligned_features * spatial_attention
             
         elif self.use_anatomy_prior and not self.use_dcn_alignment:
             # 【情形 B：仅先验】生成了先验图谱，但只做注意力加权，不做DCN形变
@@ -122,13 +123,14 @@ class APM_Former_ImageOnly(nn.Module):
             guide_down = F.interpolate(guide_map, size=swin_feature.shape[2:], mode='trilinear', align_corners=False)
             spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
 
-# 🌟 新增补丁：同样强行抹除外围 Bias 噪音
-            # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
-            # 恢复为最初的硬约束
-            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
-            spatial_attention = spatial_attention * guide_spatial_mask
+# # 🌟 新增补丁：同样强行抹除外围 Bias 噪音
+#             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
+#             # 恢复为最初的硬约束
+#             guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
+#             spatial_attention = spatial_attention * guide_spatial_mask
 
-            focused_features = aligned_features + (aligned_features * spatial_attention)
+            # focused_features = aligned_features + (aligned_features * spatial_attention)
+            focused_features = aligned_features * spatial_attention
             
         else:
             # 【情形 A：纯Baseline】什么都不加，直接拿 Swin 特征去分类
