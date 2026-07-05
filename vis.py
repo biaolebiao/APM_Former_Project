@@ -115,7 +115,7 @@ if __name__ == "__main__":
     ).to(device)
 
     # 🌟 修复警告：加入 weights_only=True
-    model.load_state_dict(torch.load("checkpoints/best_model3_APM_Former.pth", map_location=device, weights_only=True))
+    model.load_state_dict(torch.load("checkpoints/best_model2_APM_Former.pth", map_location=device, weights_only=True))
 
     # 运行画图
     visualize_model_outputs_premium(model, test_loader, device, slice_axis=2)
