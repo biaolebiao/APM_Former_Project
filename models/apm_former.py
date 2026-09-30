@@ -52,9 +52,23 @@ class APM_Former_ImageOnly(nn.Module):
         nn.init.zeros_(self.shallow_downsample[0].bias)
 
         
-        #  新增核心：特征平滑与降维层 (将 168 维降到 48 维) 
-        self.feature_fusion = nn.Sequential(
-            nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False),
+        # #  新增核心：特征平滑与降维层 (将 168 维降到 48 维) 
+        # self.feature_fusion = nn.Sequential(
+        #     nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False),
+        #     nn.InstanceNorm3d(feat_mid_channels),
+        #     nn.LeakyReLU(0.2, inplace=True)
+        # )
+        # 👇 替换为：多尺度感受野重构模块 (模拟多窗口尺寸效果)
+        self.reduce_conv = nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False)
+        
+        # 模拟小窗口 (精细病灶如海马体)
+        self.branch_local = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=1, dilation=1, bias=False)
+        # 模拟中等窗口
+        self.branch_mid = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=2, dilation=2, bias=False)
+        # 模拟大窗口 (捕捉全局脑室形变)
+        self.branch_global = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=4, dilation=4, bias=False)
+        
+        self.fusion_norm_act = nn.Sequential(
             nn.InstanceNorm3d(feat_mid_channels),
             nn.LeakyReLU(0.2, inplace=True)
         )
@@ -74,7 +88,7 @@ class APM_Former_ImageOnly(nn.Module):
             nn.Linear(fc_hidden, num_classes)
         )
         
-        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0)
+        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0,bias=False)
         
     def forward(self, mri_image):
         # 1. Swin特征提取 (这是所有消融实验都要用到的 Baseline)
@@ -89,7 +103,18 @@ class APM_Former_ImageOnly(nn.Module):
         # swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
         # 👇 修改：拼接后立刻进行特征平滑和降维
         swin_feature_raw = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
-        swin_feature = self.feature_fusion(swin_feature_raw)
+        # 原代码：
+        # swin_feature = self.feature_fusion(swin_feature_raw)
+
+        # 👇 替换为：
+        swin_feature_reduced = self.reduce_conv(swin_feature_raw)
+        feat_local = self.branch_local(swin_feature_reduced)
+        feat_mid_scale = self.branch_mid(swin_feature_reduced)
+        feat_global = self.branch_global(swin_feature_reduced)
+        
+        # 将不同“窗口感受野”下的特征重新拼接
+        swin_feature_fused = torch.cat([feat_local, feat_mid_scale, feat_global], dim=1)
+        swin_feature = self.fusion_norm_act(swin_feature_fused)
         
         # 🔴 关键点：设定默认的占位返回值
         # 为了保证无论走哪个 if 分支，最后 return 的 4 个变量都存在，防止外面的代码解包报错
@@ -109,8 +134,8 @@ class APM_Former_ImageOnly(nn.Module):
 #  # 🌟 新增补丁：根据图谱通道求和，生成 0/1 掩码，强行抹除所有非核心区的 Bias 噪音
 #             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
 #             # 恢复为最初的硬约束
-#             guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
-#             spatial_attention = spatial_attention * guide_spatial_mask  # 强制外围清零
+            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
+            spatial_attention = spatial_attention * guide_spatial_mask  # 强制外围清零
             
             # focused_features = aligned_features + (aligned_features * spatial_attention)
             focused_features = aligned_features * spatial_attention
@@ -126,8 +151,8 @@ class APM_Former_ImageOnly(nn.Module):
 # # 🌟 新增补丁：同样强行抹除外围 Bias 噪音
 #             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
 #             # 恢复为最初的硬约束
-#             guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
-#             spatial_attention = spatial_attention * guide_spatial_mask
+            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
+            spatial_attention = spatial_attention * guide_spatial_mask
 
             # focused_features = aligned_features + (aligned_features * spatial_attention)
             focused_features = aligned_features * spatial_attention

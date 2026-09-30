@@ -2,7 +2,6 @@ import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 import torch.nn.functional as F
 
 # 导入你的模型和配置
@@ -10,100 +9,139 @@ from models.apm_former import APM_Former_ImageOnly
 from utils.dataset import get_test_dataloader
 from utils.config import TEST_CSV, TRAIN_IMG_SIZE, NUM_CLASSES
 
-def visualize_model_outputs_premium(model, dataloader, device, slice_axis=2, slice_idx=None):
-    model.eval()
-    
-    images, labels = next(iter(dataloader))
-    images = images.to(device)
-    
-    with torch.no_grad():
-        logits, aligned_features, spatial_attention, displacement_field = model(images)
+class GradCAM3D:
+    """
+    针对 3D 医疗影像的 Grad-CAM 实现
+    """
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.activations = None
+        self._forward_handle = self.target_layer.register_forward_hook(self._save_activation)
+
+    def _save_activation(self, module, input, output):
+        self.activations = output[0] if isinstance(output, tuple) else output
+
+    def generate(self, input_tensor, target_class=None):
+        self.model.eval()
         
-        orig_size = images.shape[2:] 
-        spatial_attention = F.interpolate(spatial_attention, size=orig_size, mode='trilinear', align_corners=False)
-        displacement_field = F.interpolate(displacement_field, size=orig_size, mode='trilinear', align_corners=False)
-    
-    img = images[0, 0].cpu().numpy()
-    att = spatial_attention[0, 0].cpu().numpy()
-    disp = displacement_field[0].cpu().numpy() 
-    
-    if slice_idx is None:
-        slice_idx = img.shape[slice_axis] // 2
+        model_outputs = self.model(input_tensor)
+        logits = model_outputs[0]
         
-    if slice_axis == 0:
-        img_slice, att_slice = img[slice_idx, :, :], att[slice_idx, :, :]
-        dy_slice, dx_slice = disp[1, slice_idx, :, :], disp[2, slice_idx, :, :]
-    elif slice_axis == 1: 
-        img_slice, att_slice = img[:, slice_idx, :], att[:, slice_idx, :]
-        dy_slice, dx_slice = disp[0, slice_idx, :, :], disp[2, slice_idx, :, :]
-    else:                 
-        img_slice, att_slice = img[:, :, slice_idx], att[:, :, slice_idx]
-        dy_slice, dx_slice = disp[0, :, :, slice_idx], disp[1, :, :, slice_idx]
+        if target_class is None:
+            target_class = logits[0].argmax().item()
 
-    # 🌟 修复：去除强制挖空的 masked_where，只做归一化
-    # 这样底层就会是很均匀的蓝色，高亮区是红黄，完美对标 Grad-CAM
-    att_slice = (att_slice - att_slice.min()) / (att_slice.max() - att_slice.min() + 1e-8)
-    
-    h, w = img_slice.shape
-    box_size = 40  
-    y1, y2 = h//2 - box_size//2, h//2 + box_size//2
-    x1, x2 = w//2 - box_size//2, w//2 + box_size//2
+        self.model.zero_grad()
+        target_score = logits[0, target_class]
+        
+        activations = self.activations
+        
+        grads = torch.autograd.grad(
+            outputs=target_score,
+            inputs=activations,
+            grad_outputs=torch.ones_like(target_score),
+            retain_graph=True,
+            create_graph=False
+        )[0]
 
-    step = 8 
-    grid_y, grid_x = np.mgrid[y1:y2:step, x1:x2:step]
-    dy_sampled = dy_slice[y1:y2:step, x1:x2:step]
-    dx_sampled = dx_slice[y1:y2:step, x1:x2:step]
+        gradients_np = grads.cpu().data.numpy()[0]
+        activations_np = activations.cpu().data.numpy()[0]
 
-    # ================= 开始绘图 =================
-    bg_color = '#0D1424'
-    text_color = '#E5E7EB'
-    
-    fig, axes = plt.subplots(1, 3, figsize=(15, 6), facecolor=bg_color)
-    label_str = 'pMCI' if labels[0].item() == 1 else 'sMCI'
-    
-    for ax in axes:
-        ax.set_facecolor(bg_color)
-        ax.axis('off')
+        weights = np.mean(gradients_np, axis=(1, 2, 3))
 
-    # 图 1: 原始 MRI
-    axes[0].imshow(img_slice, cmap='gray', interpolation='lanczos')
-    axes[0].set_title(f"{label_str} - Original MRI", color=text_color, fontsize=15, pad=15)
+        cam = np.zeros(activations_np.shape[1:], dtype=np.float32)
+        for i, w in enumerate(weights):
+            cam += w * activations_np[i]
 
-    # 图 2: 纯正平滑注意力热力图 (去掉 mask 后，灰块彻底消失)
-    axes[1].imshow(img_slice, cmap='gray', interpolation='lanczos')
-    im_att = axes[1].imshow(att_slice, cmap='jet', alpha=0.55, interpolation='lanczos') 
-    axes[1].set_title(f"{label_str} - Anatomy Attention", color=text_color, fontsize=15, pad=15)
-    
-    cbar1 = plt.colorbar(im_att, ax=axes[1], orientation='horizontal', fraction=0.046, pad=0.04)
-    cbar1.ax.tick_params(colors=text_color, labelsize=10)
-    cbar1.outline.set_edgecolor(text_color)
+        cam = np.maximum(cam, 0)
+        cam = (cam - np.min(cam)) / (np.max(cam) - np.min(cam) + 1e-8)
+        
+        return cam, target_class, model_outputs
 
-    # 图 3: DCN 形变场 (优化箭头形态，让它看起来更专业)
-    axes[2].imshow(img_slice, cmap='gray', interpolation='lanczos')
-    
-    rect = patches.Rectangle((x1, y1), box_size, box_size, linewidth=1.5, edgecolor='yellow', facecolor='none', linestyle='--')
-    axes[2].add_patch(rect)
-    
-    # 调整箭头：变细长一点，取消粗大感
-    axes[2].quiver(grid_x, grid_y, dx_sampled, -dy_sampled, color='#FF3333', 
-                   scale=3.5, alpha=1.0, width=0.007, headwidth=4, headlength=5)
-    axes[2].set_title(f"{label_str} - Deformable Field (ROI)", color=text_color, fontsize=15, pad=15)
 
-    plt.tight_layout()
+def visualize_grid_gradcam(model, dataloader, device, target_layer, slice_axis=2, slices=[35, 48, 60]):
+    # 设置你在验证集表现最好的动态阈值
+    DYNAMIC_THRESHOLD = 0.40 
     
-    save_dir = "visualizations"
+    # 设置全局字体为 Times New Roman
+    plt.rcParams['font.family'] = 'Times New Roman'
+    
+    grad_cam = GradCAM3D(model, target_layer)
+    save_dir = "visualizations_candidates"
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f'visual_evidence_axis{slice_axis}_slice{slice_idx}_final.png')
     
-    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor=bg_color)
-    print(f"✅ 图片已成功保存至: {save_path}")
-    plt.show()
+    print(f"🔍 开始全量扫描测试集 (阈值: {DYNAMIC_THRESHOLD})... 结果将保存在 {save_dir} 文件夹中")
+    
+    patient_count = 0
+    for batch_idx, (images, labels) in enumerate(dataloader):
+        images_dev = images.to(device)
+        
+        with torch.no_grad():
+            outputs = model(images_dev)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            probs_pmci = F.softmax(logits, dim=1)[:, 1].cpu()
+            preds = (probs_pmci > DYNAMIC_THRESHOLD).long()
+            
+        for i in range(len(labels)):
+            patient_count += 1
+            true_label = labels[i].item()
+            pred_label = preds[i].item()
+            prob = probs_pmci[i].item()
+            
+            # 只处理预测完全正确的样本 (TN 或 TP)
+            if true_label == pred_label:
+                img_tensor = images[i:i+1].clone().to(device)
+                img_tensor.requires_grad = True
+                orig_size = img_tensor.shape[2:]
+                
+                # 生成 CAM
+                cam_raw, _, _ = grad_cam.generate(img_tensor)
+                cam_tensor = torch.from_numpy(cam_raw).unsqueeze(0).unsqueeze(0)
+                cam_resized = F.interpolate(cam_tensor, size=orig_size, mode='trilinear', align_corners=False)
+                cam_3d = cam_resized.squeeze().numpy()
+                img_np = img_tensor[0, 0].detach().cpu().numpy()
+                
+                # 开始绘图 (1行 x 3列，针对单个病人)
+                bg_color = '#0D1424'
+                text_color = '#E5E7EB'
+                fig, axes = plt.subplots(1, len(slices), figsize=(4 * len(slices), 3.5), facecolor=bg_color)
+                
+                patient_type = "pMCI" if true_label == 1 else "sMCI"
+                
+                for j, s_idx in enumerate(slices):
+                    # 提取并旋转切片
+                    if slice_axis == 0:
+                        s_img, s_cam = img_np[s_idx, :, :], cam_3d[s_idx, :, :]
+                    elif slice_axis == 1:
+                        s_img, s_cam = img_np[:, s_idx, :], cam_3d[:, s_idx, :]
+                    else:
+                        s_img, s_cam = img_np[:, :, s_idx], cam_3d[:, :, s_idx]
+                        
+                    s_img = np.rot90(s_img, k=-1)
+                    s_cam = np.rot90(s_cam, k=-1)
+                    
+                    axes[j].imshow(s_img, cmap='gray', interpolation='lanczos')
+                    axes[j].imshow(s_cam, cmap='jet', alpha=0.55, interpolation='lanczos', vmin=0, vmax=1)
+                    axes[j].axis('off')
+                    
+                    axes[j].set_title(f'Slice {s_idx}', color=text_color, fontsize=16, pad=10)
+                    
+                    if j == 0:
+                        axes[j].text(-0.15, 0.5, f"True {patient_type}\n(Pred: {patient_type})", 
+                                     color=text_color, fontsize=14, va='center', ha='center', rotation=90, transform=axes[j].transAxes)
+                
+                plt.tight_layout()
+                file_name = f"Patient_{patient_count:03d}_{patient_type}.png"
+                plt.savefig(os.path.join(save_dir, file_name), dpi=200, bbox_inches='tight', facecolor=bg_color)
+                plt.close(fig) # 关闭画布防止内存泄漏
+                print(f"✅ 已保存: {file_name}")
 
+    print(f"🎉 扫描结束！请前往 {save_dir} 文件夹挑选完美的对比图。")
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test_loader = get_test_dataloader(TEST_CSV, batch_size=4, target_size=TRAIN_IMG_SIZE)
+    # 为了确保能抓到一个 sMCI 和一个 pMCI，可以稍微把 batch_size 设大一点（比如 8）
+    test_loader = get_test_dataloader(TEST_CSV, batch_size=8, target_size=TRAIN_IMG_SIZE)
 
-    # 实例化完全体模型
     model = APM_Former_ImageOnly(
         img_size=TRAIN_IMG_SIZE,
         in_channels=1,
@@ -114,8 +152,12 @@ if __name__ == "__main__":
         use_dcn_alignment=True
     ).to(device)
 
-    # 🌟 修复警告：加入 weights_only=True
-    model.load_state_dict(torch.load("checkpoints/best_model2_APM_Former.pth", map_location=device, weights_only=True))
+    model.load_state_dict(torch.load("checkpoints/best.pth", map_location=device, weights_only=True))
 
-    # 运行画图
-    visualize_model_outputs_premium(model, test_loader, device, slice_axis=2)
+    target_layer = model.fusion_norm_act
+
+    # 设定你要观察的切片索引 (假设你的输入深度是 96，这里取 35, 48, 60 三层)
+    # 你可以根据实际脑部核心区域（如海马体所在层）自行修改这些数值
+    target_slices = [35, 48, 60] 
+
+    visualize_grid_gradcam(model, test_loader, device, target_layer, slice_axis=2, slices=target_slices)
