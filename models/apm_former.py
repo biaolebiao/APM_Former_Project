@@ -122,44 +122,31 @@ class APM_Former_ImageOnly(nn.Module):
         spatial_attention = torch.ones_like(swin_feature[:, 0:1, ...]) # 默认全是1，乘了等于没乘
         displacement_field = torch.zeros(swin_feature.shape[0], 3, *swin_feature.shape[2:], device=swin_feature.device) # 默认形变场为0
 
-        # 2. 核心消融逻辑分支
-        if self.use_anatomy_prior and self.use_dcn_alignment:
-            # 【情形 D/C：完全体 / 只有DCN】先验图谱 + DCN形变对齐
-            guide_map = self.anatomy_guide_gen(mri_image) 
-            aligned_features, displacement_field = self.anatomy_alignment(swin_feature, guide_map)
-            
-            guide_down = F.interpolate(guide_map, size=aligned_features.shape[2:], mode='trilinear', align_corners=False)
-            spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
-
-#  # 🌟 新增补丁：根据图谱通道求和，生成 0/1 掩码，强行抹除所有非核心区的 Bias 噪音
-#             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
-#             # 恢复为最初的硬约束
-            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
-            spatial_attention = spatial_attention * guide_spatial_mask  # 强制外围清零
-            
-            # focused_features = aligned_features + (aligned_features * spatial_attention)
-            focused_features = aligned_features * spatial_attention
-            
-        elif self.use_anatomy_prior and not self.use_dcn_alignment:
-            # 【情形 B：仅先验】生成了先验图谱，但只做注意力加权，不做DCN形变
+        # 2. 完全解耦的消融逻辑
+        # ==========================================
+        
+        # 模块 A：解剖先验 (PAP)
+        if self.use_anatomy_prior:
             guide_map = self.anatomy_guide_gen(mri_image)
-            
-            # 空间注意力 (直接作用在未对齐的 swin_feature 上)
             guide_down = F.interpolate(guide_map, size=swin_feature.shape[2:], mode='trilinear', align_corners=False)
+            
+            # 生成注意力 Mask 并强行抹除外围噪音
             spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
-
-# # 🌟 新增补丁：同样强行抹除外围 Bias 噪音
-#             # guide_spatial_mask = torch.clamp(guide_down.sum(dim=1, keepdim=True), min=0.0, max=1.0)
-#             # 恢复为最初的硬约束
             guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
             spatial_attention = spatial_attention * guide_spatial_mask
-
-            # focused_features = aligned_features + (aligned_features * spatial_attention)
-            focused_features = aligned_features * spatial_attention
-            
         else:
-            # 【情形 A：纯Baseline】什么都不加，直接拿 Swin 特征去分类
-            focused_features = swin_feature
+            # 如果关闭了先验，为了让后续的 DCN 仍能运行（纯数据驱动），传入全 0 的 guide_map
+            guide_map = torch.zeros(swin_feature.shape[0], self.guide_channels, *mri_image.shape[2:], device=swin_feature.device)
+
+        # 模块 B：形变对齐 (AG-DAM 或者是 标准DCN)
+        if self.use_dcn_alignment:
+            # 如果 use_anatomy_prior=False，这里的 guide_map 是全0，网络会自动退化为纯数据驱动的 DCN
+            aligned_features, displacement_field = self.anatomy_alignment(swin_feature, guide_map)
+        else:
+            aligned_features = swin_feature
+
+        # 最终特征加权 (如果 use_anatomy_prior=False，spatial_attention 为默认的全 1，等于没加权)
+        focused_features = aligned_features * spatial_attention
 
         # 3. 分类头 (永远都会执行)
         pooled_features = self.global_pool(focused_features)

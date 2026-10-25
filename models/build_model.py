@@ -16,33 +16,33 @@ def build_selected_model(model_type, device, img_size=(96, 96, 96)):
 
     PRETRAINED_SWIN_PATH = "checkpoints/model_swinvit.pt"
     
-    if model_type == "APM_Former":
-        # 对应论文 Table II 中的 Ours / Variant 2: AP(+) + DCN(+)
+    if model_type == "Baseline":
         from models.apm_former import APM_Former_ImageOnly
         model = APM_Former_ImageOnly(
-            feature_size=24, num_classes=2, 
-            pretrained_swin_path=PRETRAINED_SWIN_PATH,
-            use_anatomy_prior=True, use_dcn_alignment=True
+            feature_size=24, num_classes=2, pretrained_swin_path=PRETRAINED_SWIN_PATH,
+            use_anatomy_prior=False, use_dcn_alignment=False
         ).to(device)
 
-    elif model_type == "APM_Former_Variant1":
-        # 对应论文 Table II 中的 Variant 1: AP(+) + DCN(-)
-        # 仅生成先验注意力掩码，不执行 DCN 形变对齐
+    elif model_type == "Variant_A":
         from models.apm_former import APM_Former_ImageOnly
         model = APM_Former_ImageOnly(
-            feature_size=24, num_classes=2, 
-            pretrained_swin_path=PRETRAINED_SWIN_PATH,
+            feature_size=24, num_classes=2, pretrained_swin_path=PRETRAINED_SWIN_PATH,
             use_anatomy_prior=True, use_dcn_alignment=False 
         ).to(device)
 
-    elif model_type == "Pure_Swin":
-        # 对应论文 Table II 中的 Baseline: AP(-) + DCN(-)
-        # 退化为纯净的 Swin Transformer 架构
+    elif model_type == "Variant_B":
         from models.apm_former import APM_Former_ImageOnly
         model = APM_Former_ImageOnly(
-            feature_size=24, num_classes=2, 
-            pretrained_swin_path=PRETRAINED_SWIN_PATH,
-            use_anatomy_prior=False, use_dcn_alignment=False
+            feature_size=24, num_classes=2, pretrained_swin_path=PRETRAINED_SWIN_PATH,
+            use_anatomy_prior=False, use_dcn_alignment=True 
+        ).to(device)
+
+    elif model_type == "Ours":
+        # 这个也适用于 A+B，是否带 TV Loss 由 Notebook 里的 tv_weight 决定
+        from models.apm_former import APM_Former_ImageOnly
+        model = APM_Former_ImageOnly(
+            feature_size=24, num_classes=2, pretrained_swin_path=PRETRAINED_SWIN_PATH,
+            use_anatomy_prior=True, use_dcn_alignment=True
         ).to(device)
 
     elif model_type == "ResNet18":
