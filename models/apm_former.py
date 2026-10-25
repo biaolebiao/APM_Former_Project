@@ -8,8 +8,14 @@ from .anatomy_guide import AnatomyPriorGuideGeneration
 from .alignment import AnatomyGuidedAlignment
 
 class APM_Former_ImageOnly(nn.Module):
-    def __init__(self, img_size=(96, 96, 96), in_channels=1, num_classes=2, feature_size=48, guide_channels=18, pretrained_swin_path=None,dropout1=0.3, dropout2=0.2, fc_hidden=64):
+    def __init__(self, img_size=(96, 96, 96), in_channels=1, num_classes=2, feature_size=24, guide_channels=18, pretrained_swin_path=None,dropout1=0.3, dropout2=0.2, fc_hidden=64,
+                 use_anatomy_prior=True,
+                 use_dcn_alignment=True
+                 ):
         super().__init__()
+        self.use_anatomy_prior = use_anatomy_prior
+        self.use_dcn_alignment = use_dcn_alignment
+
         self.guide_channels = guide_channels
         
         # 🚨 核心修复1：关闭 use_checkpoint（解决CheckpointError）
@@ -35,19 +41,40 @@ class APM_Former_ImageOnly(nn.Module):
         mri_feature_channels = feat_shallow_channels + feat_mid_channels + feat_deep_channels
         # mri_feature_channels = feat_mid_channels + feat_deep_channels
 
-        # 🌟 新增抢救代码：用卷积替代平均池化来进行智能下采样
         self.shallow_downsample = nn.Sequential(
             # kernel_size=3, stride=2, padding=1 可以完美将空间尺寸减半 (48 -> 24)
             nn.Conv3d(feat_shallow_channels, feat_shallow_channels, kernel_size=3, stride=2, padding=1),
             nn.InstanceNorm3d(feat_shallow_channels),
             nn.LeakyReLU(0.2, inplace=True)
         )
-        # 👇 加上这两行科学初始化代码，防止新卷积层开局输出巨大噪声
+        # 加上科学初始化代码，防止新卷积层开局输出巨大噪声
         nn.init.kaiming_normal_(self.shallow_downsample[0].weight, mode='fan_out', nonlinearity='leaky_relu')
         nn.init.zeros_(self.shallow_downsample[0].bias)
+
+        
+        # #  新增核心：特征平滑与降维层 (将 168 维降到 48 维) 
+        # self.feature_fusion = nn.Sequential(
+        #     nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False),
+        #     nn.InstanceNorm3d(feat_mid_channels),
+        #     nn.LeakyReLU(0.2, inplace=True)
+        # )
+        # 👇 替换为：多尺度感受野重构模块 (模拟多窗口尺寸效果)
+        self.reduce_conv = nn.Conv3d(mri_feature_channels, feat_mid_channels, kernel_size=1, bias=False)
+        
+        # 模拟小窗口 (精细病灶如海马体)
+        self.branch_local = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=1, dilation=1, bias=False)
+        # 模拟中等窗口
+        self.branch_mid = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=2, dilation=2, bias=False)
+        # 模拟大窗口 (捕捉全局脑室形变)
+        self.branch_global = nn.Conv3d(feat_mid_channels, feat_mid_channels // 3, kernel_size=3, padding=4, dilation=4, bias=False)
+        
+        self.fusion_norm_act = nn.Sequential(
+            nn.InstanceNorm3d(feat_mid_channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
         
         self.anatomy_alignment = AnatomyGuidedAlignment(
-            mri_channels=mri_feature_channels, 
+            mri_channels=feat_mid_channels, # 👇 修改：这里原来是 mri_feature_channels，现在改为降维后的 feat_mid_channels
             guide_channels=guide_channels
         )
         
@@ -55,42 +82,79 @@ class APM_Former_ImageOnly(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool3d(1)
         self.classifier = nn.Sequential(
             nn.Dropout(p=dropout1),
-            nn.Linear(mri_feature_channels, fc_hidden),
+            nn.Linear(feat_mid_channels, fc_hidden), # 👇 修改：这里原来是 mri_feature_channels，现在改为降维后的 feat_mid_channels
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout2),
             nn.Linear(fc_hidden, num_classes)
         )
         
-        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0)
+        self.attention_conv = nn.Conv3d(guide_channels, 1, kernel_size=1, padding=0,bias=False)
         
     def forward(self, mri_image):
-        # 1. 解剖先验
-        guide_map = self.anatomy_guide_gen(mri_image) 
-        
-        # 2. Swin特征提取
+        # 1. Swin特征提取 (这是所有消融实验都要用到的 Baseline)
         hidden_states = self.swin_backbone.swinViT(mri_image)
         feat_shallow = hidden_states[0]
         feat_mid = hidden_states[1]
         feat_deep = hidden_states[2]
-        # 🌟 抢救代码：使用可学习的卷积进行特征浓缩，而不是直接平均
+        
+        # 使用可学习的卷积进行特征浓缩
         feat_shallow_down = self.shallow_downsample(feat_shallow)
-        # feat_shallow_down = F.adaptive_avg_pool3d(feat_shallow, output_size=feat_mid.shape[2:])
         feat_deep_up = F.interpolate(feat_deep, size=feat_mid.shape[2:], mode='trilinear', align_corners=False)
-        swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        # swin_feature = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        # 👇 修改：拼接后立刻进行特征平滑和降维
+        swin_feature_raw = torch.cat([feat_shallow_down, feat_mid, feat_deep_up], dim=1)
+        # 原代码：
+        # swin_feature = self.feature_fusion(swin_feature_raw)
+
+        # 👇 替换为：
+        swin_feature_reduced = self.reduce_conv(swin_feature_raw)
+        feat_local = self.branch_local(swin_feature_reduced)
+        feat_mid_scale = self.branch_mid(swin_feature_reduced)
+        feat_global = self.branch_global(swin_feature_reduced)
         
-        aligned_features = self.anatomy_alignment(swin_feature, guide_map)
+        # 将不同“窗口感受野”下的特征重新拼接
+        swin_feature_fused = torch.cat([feat_local, feat_mid_scale, feat_global], dim=1)
+        swin_feature = self.fusion_norm_act(swin_feature_fused)
         
-        # 3. 空间注意力
-        guide_down = F.interpolate(guide_map, size=aligned_features.shape[2:], mode='trilinear', align_corners=False)
-        spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
+        # 🔴 关键点：设定默认的占位返回值
+        # 为了保证无论走哪个 if 分支，最后 return 的 4 个变量都存在，防止外面的代码解包报错
+        aligned_features = swin_feature
+        spatial_attention = torch.ones_like(swin_feature[:, 0:1, ...]) # 默认全是1，乘了等于没乘
+        displacement_field = torch.zeros(swin_feature.shape[0], 3, *swin_feature.shape[2:], device=swin_feature.device) # 默认形变场为0
+
+        # 2. 完全解耦的消融逻辑
+        # ==========================================
+        
+        # 模块 A：解剖先验 (PAP)
+        if self.use_anatomy_prior:
+            guide_map = self.anatomy_guide_gen(mri_image)
+            guide_down = F.interpolate(guide_map, size=swin_feature.shape[2:], mode='trilinear', align_corners=False)
+            
+            # 生成注意力 Mask 并强行抹除外围噪音
+            spatial_attention = torch.sigmoid(self.attention_conv(guide_down))
+            guide_spatial_mask = (guide_down.sum(dim=1, keepdim=True) > 1e-4).float()
+            spatial_attention = spatial_attention * guide_spatial_mask
+        else:
+            # 如果关闭了先验，为了让后续的 DCN 仍能运行（纯数据驱动），传入全 0 的 guide_map
+            guide_map = torch.zeros(swin_feature.shape[0], self.guide_channels, *mri_image.shape[2:], device=swin_feature.device)
+
+        # 模块 B：形变对齐 (AG-DAM 或者是 标准DCN)
+        if self.use_dcn_alignment:
+            # 如果 use_anatomy_prior=False，这里的 guide_map 是全0，网络会自动退化为纯数据驱动的 DCN
+            aligned_features, displacement_field = self.anatomy_alignment(swin_feature, guide_map)
+        else:
+            aligned_features = swin_feature
+
+        # 最终特征加权 (如果 use_anatomy_prior=False，spatial_attention 为默认的全 1，等于没加权)
         focused_features = aligned_features * spatial_attention
-        
-        # 4. 分类
+
+        # 3. 分类头 (永远都会执行)
         pooled_features = self.global_pool(focused_features)
         flattened_features = torch.flatten(pooled_features, 1)
         logits = self.classifier(flattened_features)
         
-        return logits, aligned_features, spatial_attention
+        # 无论经过哪个分支，都会返回这4个变量，你的 train_epoch 和 val_epoch 完全不需要改代码
+        return logits, aligned_features, spatial_attention, displacement_field
     
     def train(self, mode=True):
         super().train(mode)

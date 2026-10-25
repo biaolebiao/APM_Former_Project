@@ -58,10 +58,15 @@ class AnatomyPriorGuideGeneration(nn.Module):
         # 计算带权重的向导图（使用插值后的图谱）
         w_k = torch.sigmoid(self.channel_weights).view(1, -1, 1, 1, 1)
         adaptive_guide = w_k * atlas_prior_resampled
-        
+    
+        # 调试输出
+        # print(f"图谱值范围: {atlas_prior_resampled.min().item():.3f}-{atlas_prior_resampled.max().item():.3f}")
+        # print(f"权重值范围: {w_k.min().item():.3f}-{w_k.max().item():.3f}")
+        # print(f"输出值范围: {adaptive_guide.min().item():.3f}-{adaptive_guide.max().item():.3f}")
+    
         # 适配当前Batch大小
         adaptive_guide_batched = adaptive_guide.expand(B, -1, -1, -1, -1)
-        
+    
         return adaptive_guide_batched
         # 校验空间维度匹配 (D, H, W)
         # if self.atlas_prior.shape[2:] != mri_image.shape[2:]:
